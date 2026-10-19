@@ -1,0 +1,155 @@
+# ============================================================================
+# Banner 指纹识别规则（与程序代码完全解耦）
+#
+# 匹配顺序：priority 从高到低；同一规则内 patterns 按顺序尝试，首个命中生效。
+# require：前置条件，必须全部命中才会尝试 patterns（用于收窄误报）。
+# 命名捕获组：product / version / os_hint，命中值会覆盖规则中的默认值。
+# 新增协议只需在此追加规则并重启服务，无需修改、重新编译代码。
+# ============================================================================
+
+rules:
+  # ---------------------------- SSH ----------------------------
+  - name: ssh
+    protocol: SSH
+    product: OpenSSH
+    confidence: 0.95
+    priority: 100
+    patterns:
+      - '(?m)^SSH-(?P<protover>[0-9]+\.[0-9]+)-(?P<product>[A-Za-z][A-Za-z0-9._-]*?)(?:_(?P<version>[^ \t\r\n]+))?(?:[ \t]+.*)?$'
+
+  # ---------------------------- HTTP ---------------------------
+  # 产品级规则：必须同时存在 HTTP 状态行与 Server 头，降低误报。
+  - name: http-server-header
+    protocol: HTTP
+    confidence: 0.9
+    priority: 90
+    require:
+      - '(?m)^HTTP/[0-9](?:\.[0-9])?[ \t]+[0-9]{3}'
+    patterns:
+      # 版本号同时兼容 nginx/1.24.0 与 Jetty(9.4.51.v20230217) 两种常见写法。
+      - '(?mi)^Server:[ \t]*(?P<product>[A-Za-z][A-Za-z0-9._-]*)(?:[/ (]+(?P<version>[0-9][^ \t;)\r\n]*))?'
+
+  # 协议级兜底：只有状态行也能识别为 HTTP。
+  - name: http-status-only
+    protocol: HTTP
+    confidence: 0.7
+    priority: 20
+    patterns:
+      - '(?m)^HTTP/[0-9](?:\.[0-9])?[ \t]+[0-9]{3}'
+
+  # --------------------------- MySQL ---------------------------
+  # MariaDB 握手包中 server version 含 MariaDB 字样，优先于 MySQL 规则。
+  - name: mariadb-handshake
+    protocol: MySQL
+    product: MariaDB
+    confidence: 0.9
+    priority: 110
+    patterns:
+      - '(?s)^.{3}\x00\x0a(?P<version>[0-9]+\.[0-9]+\.[0-9]+[^\x00]*MariaDB[^\x00]*)\x00'
+
+  # MySQL 初始握手包：3 字节包长 + 1 字节序号 + 0x0a 协议版本 + NUL 结尾的版本号。
+  - name: mysql-handshake
+    protocol: MySQL
+    product: MySQL
+    confidence: 0.9
+    priority: 100
+    patterns:
+      - '(?s)^.{3}\x00\x0a(?P<version>[0-9]+\.[0-9]+\.[0-9]+[^\x00]*)\x00'
+
+  # --------------------------- Redis ---------------------------
+  # INFO 命令返回的版本号置信度最高。
+  - name: redis-info
+    protocol: Redis
+    product: Redis
+    confidence: 0.95
+    priority: 110
+    patterns:
+      - '(?m)^redis_version:(?P<version>[0-9][0-9A-Za-z.\-]*)'
+
+  # 典型 RESP 响应：无认证、命令错误、PONG、# Server 段等。
+  - name: redis-reply
+    protocol: Redis
+    product: Redis
+    confidence: 0.7
+    priority: 80
+    patterns:
+      - '^\+PONG'
+      - '^-NOAUTH'
+      - '^-ERR'
+      - '^-WRONGTYPE'
+      - '^-MOVED'
+      - '^\$[0-9]+\r?\n'
+      - '(?m)^# Server\r?$'
+
+  # ---------------------------- FTP ----------------------------
+  - name: ftp-proftpd
+    protocol: FTP
+    product: ProFTPD
+    confidence: 0.9
+    priority: 100
+    patterns:
+      - '(?mi)^220[ -].*?\bProFTPD\b(?:[ /](?P<version>[0-9]+(?:\.[0-9]+)+))?'
+
+  - name: ftp-vsftpd
+    protocol: FTP
+    product: vsFTPd
+    confidence: 0.9
+    priority: 100
+    patterns:
+      - '(?mi)^220[ -].*?\bvsFTPd\b(?:[ /](?P<version>[0-9]+(?:\.[0-9]+)+))?'
+
+  - name: ftp-pure-ftpd
+    protocol: FTP
+    product: Pure-FTPd
+    confidence: 0.9
+    priority: 100
+    patterns:
+      - '(?mi)^220[ -].*?\bPure-FTPd\b'
+
+  # 通用 220 欢迎语。优先级低于 SMTP，避免把邮件服务误判成 FTP。
+  - name: ftp-generic
+    protocol: FTP
+    confidence: 0.6
+    priority: 10
+    patterns:
+      - '(?m)^220[ -]'
+
+  # ---------------------------- SMTP ---------------------------
+  # 题目未要求 SMTP，但 220 与 FTP 冲突，这里显式收口，避免误判。
+  - name: smtp-greeting
+    protocol: SMTP
+    confidence: 0.8
+    priority: 95
+    patterns:
+      - '(?mi)^220[ -].*\b(?:ESMTP|SMTP)\b'
+
+  # ---------------------------- TLS ----------------------------
+  # TLS Handshake：0x16 + 版本 0x0300~0x0304，无法从密文进一步提取产品。
+  - name: tls-handshake
+    protocol: TLS
+    confidence: 0.75
+    priority: 100
+    patterns:
+      - '(?s)^\x16\x03[\x00-\x04]'
+
+# ----------------------------------------------------------------------------
+# 操作系统线索：按顺序匹配，命中即返回。SSH 的 Ubuntu-3、Debian-1、
+# HTTP Server 头中的 (Ubuntu) 等都会被归一化为可读的系统名。
+# ----------------------------------------------------------------------------
+os_hints:
+  - pattern: '(?i)\bubuntu\b'
+    value: Ubuntu
+  - pattern: '(?i)\bdebian\b'
+    value: Debian
+  - pattern: '(?i)\bcentos\b'
+    value: CentOS
+  - pattern: '(?i)\b(?:rhel|red[ \t]+hat)\b'
+    value: Red Hat
+  - pattern: '(?i)\b(?:rocky[ \t]+linux|almalinux)\b'
+    value: Rocky Linux
+  - pattern: '(?i)\bfreebsd\b'
+    value: FreeBSD
+  - pattern: '(?i)\b(?:raspbian|raspberry)\b'
+    value: Raspbian
+  - pattern: '(?i)\bwin(?:dows|64|32)\b|microsoft-iis'
+    value: Windows

@@ -1,0 +1,100 @@
+name: banner-fingerprint
+
+services:
+  # -------------------------------------------------------------------------
+  # 识别服务：仅暴露本机端口，客户端通过内部网络访问，不经过宿主机 IP。
+  # -------------------------------------------------------------------------
+  server:
+    build:
+      context: .
+      target: server
+      args:
+        VERSION: ${APP_VERSION:-dev}
+    image: banner-fingerprint-server:${APP_VERSION:-dev}
+    ports:
+      # 默认只绑定回环地址；需要远程访问时设置 BIND_ADDR=0.0.0.0。
+      - "${BIND_ADDR:-127.0.0.1}:${SERVER_PORT:-8080}:8080"
+    environment:
+      ADDR: ":8080"
+      RULES_FILE: "/etc/fp/rules.yaml"
+      WORKERS: "8"
+      MAX_BATCH: "10000"
+    volumes:
+      # 规则与镜像解耦：改完规则重启容器即可生效，无需重新编译。
+      - ./config/rules.yaml:/etc/fp/rules.yaml:ro
+    healthcheck:
+      # 镜像内没有 shell/curl，直接调用二进制自带的健康检查子命令。
+      test: ["CMD", "/server", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 256m
+    cpus: 1.0
+    restart: unless-stopped
+    stop_grace_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - edge
+      - backend
+
+  # -------------------------------------------------------------------------
+  # 客户端：一次性任务。等待 server 健康后再执行，处理完退出。
+  # 只接入 internal 网络，无法访问外网，也无法被宿主机直接访问。
+  # -------------------------------------------------------------------------
+  client:
+    build:
+      context: .
+      target: client
+    image: banner-fingerprint-client:${APP_VERSION:-dev}
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      SERVER_URL: "http://server:8080"
+      CLIENT_TIMEOUT: "60s"
+      CLIENT_BATCH_SIZE: "500"
+    volumes:
+      - ./data:/data:ro
+    command: ["-file", "/data/sample.json"]
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 128m
+    cpus: 0.5
+    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - backend
+
+networks:
+  # edge 仅用于发布 server 端口，client 不接入。
+  edge:
+    driver: bridge
+  # backend 为内部网络，容器间访问收敛为 server:8080。
+  backend:
+    driver: bridge
+    internal: true

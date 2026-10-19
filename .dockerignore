@@ -1,0 +1,11 @@
+.git
+.gitignore
+.dockerignore
+bin/
+dist/
+*.exe
+*.out
+*.md
+data/
+.idea/
+.vscode/
