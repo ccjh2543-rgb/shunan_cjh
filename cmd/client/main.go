@@ -91,7 +91,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Fprintf(os.Stderr, "共 %d 条，其中 unknown %d 条，耗时 %s\n",
+	// 表格模式下摘要与表格写入同一输出流，避免 stdout/stderr 在容器日志中交错。
+	summaryOut := io.Writer(os.Stderr)
+	if !*jsonOutput && *outPath == "" {
+		summaryOut = os.Stdout
+	}
+	fmt.Fprintf(summaryOut, "共 %d 条，其中 unknown %d 条，耗时 %s\n",
 		len(results), cli.CountUnknown(results), time.Since(startedAt).Round(time.Millisecond))
 }
 
